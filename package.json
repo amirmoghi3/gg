@@ -1,0 +1,13 @@
+{
+  "name": "gg",
+  "private": true,
+  "workspaces": ["client", "server", "shared"],
+  "scripts": {
+    "dev": "concurrently -n client,server -c blue,green \"npm:dev -w client\" \"npm:dev -w server\"",
+    "dev:client": "npm:dev -w client",
+    "dev:server": "npm:dev -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

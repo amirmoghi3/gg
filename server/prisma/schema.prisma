@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "cockroachdb"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+model User {
+  id              String   @id @default(cuid())
+  phone           String   @unique
+  nickname        String?
+  bio             String?
+  avatarUrl       String?
+  instagram       String?
+  linkedin        String?
+  country         String?
+  createdAt       DateTime @default(now())
+  lastLoginAt     DateTime?
+  gameplaySeconds Int      @default(0)
+  socialInbox     SocialEvent[] @relation("SocialInbox")
+  balances        CurrencyBalance[]
+  images          UserImage[]
+  transactionsSent     Transaction[] @relation("TxSender")
+  transactionsReceived Transaction[] @relation("TxReceiver")
+  blocksInitiated Block[] @relation("Blocker")
+  blocksReceived  Block[] @relation("Blocked")
+  mutesInitiated  Mute[]  @relation("Muter")
+  mutesReceived   Mute[]  @relation("Muted")
+  giftsSent       Gift[]  @relation("GiftSender")
+  giftsReceived   Gift[]  @relation("GiftReceiver")
+  inventory       InventoryItem[]
+  actions         ActionLog[]
+}
+
+model SocialEvent {
+  id        String   @id @default(cuid())
+  toUserId  String
+  fromUserId String?
+  type      String
+  message   String?
+  createdAt DateTime @default(now())
+
+  toUser    User     @relation("SocialInbox", fields: [toUserId], references: [id])
+}
+
+enum Currency {
+  GG
+}
+
+enum ActionType {
+  GIFT_SEND    @map("gift.send")
+  GIFT_RECEIVE @map("gift.receive")
+  GIFT_ACCEPT  @map("gift.accept")
+  GIFT_REJECT  @map("gift.reject")
+  GIFT_EXPIRE  @map("gift.expire")
+}
+
+model CurrencyBalance {
+  id        String   @id @default(cuid())
+  userId    String
+  currency  Currency
+  balance   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, currency])
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  fromUserId  String?
+  toUserId    String?
+  currency    String
+  amount      Int
+  type        String
+  createdAt   DateTime @default(now())
+
+  fromUser User? @relation("TxSender", fields: [fromUserId], references: [id])
+  toUser   User? @relation("TxReceiver", fields: [toUserId], references: [id])
+}
+
+model UserImage {
+  id        String   @id @default(cuid())
+  userId    String
+  url       String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model Block {
+  id        String   @id @default(cuid())
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id])
+  blocked User @relation("Blocked", fields: [blockedId], references: [id])
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+model Mute {
+  id        String   @id @default(cuid())
+  muterId   String
+  mutedId   String
+  createdAt DateTime @default(now())
+
+  muter User @relation("Muter", fields: [muterId], references: [id])
+  muted User @relation("Muted", fields: [mutedId], references: [id])
+
+  @@unique([muterId, mutedId])
+  @@index([mutedId])
+}
+
+model StoreItem {
+  id          String   @id @default(cuid())
+  name        String
+  category    String
+  price       Int
+  description String?
+  imageUrl    String?
+  data        Json?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  inventoryItems InventoryItem[]
+  gifts          Gift[]
+}
+
+model InventoryItem {
+  id         String   @id @default(cuid())
+  userId     String
+  storeItemId String
+  isEquipped Boolean  @default(false)
+  rootInventoryId String?
+  sourceGiftId String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id])
+  storeItem StoreItem @relation(fields: [storeItemId], references: [id])
+}
+
+model Gift {
+  id          String   @id @default(cuid())
+  fromUserId  String?
+  toUserId    String
+  storeItemId String
+  message     String?
+  fromInventoryItemId String?
+  toInventoryItemId String?
+  status      String   @default("pending")
+  expiresAt   DateTime @default(now())
+  decidedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  fromUser User? @relation("GiftSender", fields: [fromUserId], references: [id])
+  toUser   User  @relation("GiftReceiver", fields: [toUserId], references: [id])
+  storeItem StoreItem @relation(fields: [storeItemId], references: [id])
+
+  @@index([toUserId])
+}
+
+model ActionLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  type       ActionType
+  data       Json?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+}
+
+model Cooldown {
+  id        String     @id @default(cuid())
+  type      ActionType @unique
+  seconds   Int        @default(0)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
