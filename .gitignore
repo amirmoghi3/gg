@@ -53,5 +53,5 @@ infra/.env.local
 
 infra/cockroach-data/
 infra/minio-data/
-
+infra/postgres_data/
 server/prisma/migrations/
