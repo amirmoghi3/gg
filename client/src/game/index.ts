@@ -3,6 +3,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack } from "livekit-client";
 
 const STORE_IMAGE_BASE =
   ((import.meta as any).env?.VITE_STORE_IMAGE_BASE as string | undefined) ?? "";
+const API_BASE = `http://${window.location.hostname || "localhost"}:8080`;
 
 function resolveStoreImageUrl(url?: string | null) {
   if (!url) return "";
@@ -20,6 +21,29 @@ export type UserProfile = {
   avatarUrl: string | null;
   createdAt: string;
   gameplaySeconds: number;
+};
+
+type StoreItem = {
+  id: string;
+  name: string;
+  category: string;
+  price: number;
+  description?: string | null;
+  imageUrl?: string | null;
+};
+
+type InventoryItem = {
+  id: string;
+  isEquipped: boolean;
+  storeItem: StoreItem;
+  senders?: Array<{
+    id: string | null;
+    name: string;
+    avatarUrl: string | null;
+    count: number;
+    isOnline: boolean;
+    lastSeen: number | null;
+  }>;
 };
 
 type PlayerState = {
@@ -89,8 +113,9 @@ export function startGame(options: StartGameOptions) {
       document.getElementById("hud")?.remove();
       document.getElementById("minimap")?.remove();
       document.getElementById("balance-hud")?.remove();
-      document.getElementById("profile-modal")?.remove();
       document.getElementById("gift-offer-modal")?.remove();
+      document.getElementById("inventory-toggle")?.remove();
+      document.getElementById("inventory-modal")?.remove();
       const overlay = document.getElementById("game-overlay");
       overlay?.classList.remove("game-active");
     },
@@ -306,6 +331,7 @@ class BootScene extends Phaser.Scene {
     this.buildHud();
     this.buildMinimap();
     this.buildBalanceHud();
+    this.buildInventoryUi();
   }
 
   private handleProfileClosed = () => {
@@ -1040,6 +1066,77 @@ class BootScene extends Phaser.Scene {
     this.balanceHud = root;
   }
 
+  private buildInventoryUi() {
+    let button = document.getElementById("inventory-toggle") as HTMLButtonElement | null;
+    if (!button) {
+      button = document.createElement("button");
+      button.id = "inventory-toggle";
+      button.type = "button";
+      button.textContent = "Inventory";
+      document.body.appendChild(button);
+    }
+    button.onclick = () => void this.openInventoryModal();
+  }
+
+  private async openInventoryModal() {
+    let modal = document.getElementById("inventory-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "inventory-modal";
+      modal.innerHTML = `
+        <div class="inventory-modal-card">
+          <button class="inventory-modal-close">Close</button>
+          <h3>Inventory</h3>
+          <div class="inventory-modal-body">
+            <div class="inventory-modal-list">Loading...</div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) this.closeInventoryModal();
+      });
+      modal
+        .querySelector(".inventory-modal-close")
+        ?.addEventListener("click", () => this.closeInventoryModal());
+    }
+    modal.classList.add("open");
+    this.swipeInput.setEnabled(false);
+    await this.renderInventoryModal(modal);
+  }
+
+  private closeInventoryModal() {
+    const modal = document.getElementById("inventory-modal");
+    modal?.classList.remove("open");
+    this.swipeInput.setEnabled(true);
+  }
+
+  private async renderInventoryModal(modal: HTMLElement) {
+    const host = modal.querySelector(".inventory-modal-list") as HTMLElement | null;
+    if (!host) return;
+    host.textContent = "Loading...";
+    const items = await fetchInventory(this.options.token);
+    if (!items || items.length === 0) {
+      host.textContent = "No items yet.";
+      return;
+    }
+    host.textContent = "";
+    host.className = "inventory-modal-list inventory-list";
+    items.forEach((item) => {
+      const imageUrl = resolveStoreImageUrl(item.storeItem.imageUrl);
+      const row = document.createElement("div");
+      row.className = "inventory-item";
+      row.innerHTML = `
+        <div>
+          ${imageUrl ? `<img src="${imageUrl}" alt="${item.storeItem.name}" />` : ""}
+          <strong>${item.storeItem.name}</strong>
+          <span>${item.storeItem.category}</span>
+        </div>
+      `;
+      host.appendChild(row);
+    });
+  }
+
   private updateMinimap() {
     if (!this.minimapCanvas || !this.minimapCtx) return;
     const size = this.minimapSize;
@@ -1207,10 +1304,21 @@ class SwipeDirectionInput {
     if (!target) return false;
     return (
       !!target.closest(`#${this.ignoreElementId}`) ||
-      !!target.closest("#profile-modal") ||
-      !!target.closest("#gift-offer-modal")
+      !!target.closest("#public-profile-modal") ||
+      !!target.closest("#gift-offer-modal") ||
+      !!target.closest("#inventory-modal") ||
+      !!target.closest("#inventory-toggle") ||
+      !!target.closest("#confirm-modal")
     );
   }
+}
+
+async function fetchInventory(token: string): Promise<InventoryItem[] | null> {
+  const res = await fetch(`${API_BASE}/inventory`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as InventoryItem[];
 }
 
 function roundRect(

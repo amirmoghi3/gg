@@ -1,0 +1,400 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: #0e1116;
+  font-family: "Trebuchet MS", sans-serif;
+}
+
+#app {
+  width: 100vw;
+  height: 100vh;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#game-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: none;
+  background: #0e1116;
+}
+
+#game-overlay.game-active {
+  display: block;
+}
+
+#game-overlay #game-root {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+  border: none;
+}
+
+#voice-ui {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 20;
+  font-family: "Trebuchet MS", Arial, sans-serif;
+}
+
+#voice-ui button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: #0b1220;
+  background: #e8f1ff;
+  cursor: pointer;
+}
+
+#voice-ui select {
+  border: none;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #0b1220;
+  background: #dbe7ff;
+}
+
+#voice-ui button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#voice-ui div {
+  color: #e8f1ff;
+  font-size: 12px;
+}
+
+#hud {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 20;
+  font-family: "Trebuchet MS", Arial, sans-serif;
+  color: #e8f1ff;
+  background: rgba(11, 18, 32, 0.6);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+#minimap {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: 160px;
+  height: 160px;
+  z-index: 19;
+  pointer-events: none;
+}
+
+#balance-hud {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(11, 18, 32, 0.75);
+  color: #e8f1ff;
+  font-family: "Trebuchet MS", Arial, sans-serif;
+  font-size: 14px;
+}
+
+#balance-hud .balance-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(110, 231, 255, 0.2);
+  color: #6ee7ff;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+#toast-center {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  font-family: "Trebuchet MS", Arial, sans-serif;
+}
+
+.toast {
+  background: rgba(11, 18, 32, 0.9);
+  color: #e8f1ff;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(110, 231, 255, 0.3);
+  animation: toast-in 0.2s ease-out;
+}
+
+.toast.hide {
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+#inventory-toggle {
+  position: fixed;
+  left: 16px;
+  top: 60px;
+  z-index: 30;
+  background: rgba(11, 18, 32, 0.8);
+  color: #e8f1ff;
+  border: 1px solid rgba(232, 241, 255, 0.3);
+  border-radius: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+#inventory-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 14, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+
+#inventory-modal.open {
+  display: flex;
+}
+
+.inventory-modal-card {
+  width: min(520px, 92vw);
+  max-height: min(70vh, 640px);
+  background: rgba(11, 18, 32, 0.95);
+  border: 1px solid rgba(77, 96, 124, 0.8);
+  border-radius: 16px;
+  padding: 18px;
+  color: #e8f1ff;
+  box-shadow: 0 18px 50px rgba(7, 10, 15, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.inventory-modal-card h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.inventory-modal-close {
+  align-self: flex-end;
+  background: rgba(18, 28, 46, 0.8);
+  color: #e8f1ff;
+}
+
+.inventory-modal-body {
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.inventory-modal-list.inventory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inventory-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+
+.inventory-item {
+  display: grid;
+  gap: 8px;
+  background: rgba(232, 241, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.inventory-item img {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.inventory-item strong {
+  display: block;
+}
+
+.inventory-item span {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+#gift-offer-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 14, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 65;
+  font-family: "Trebuchet MS", Arial, sans-serif;
+}
+
+#gift-offer-modal.open {
+  display: flex;
+}
+
+.gift-offer-card {
+  width: min(360px, 90vw);
+  background: rgba(11, 18, 32, 0.95);
+  border: 1px solid rgba(90, 120, 160, 0.25);
+  border-radius: 16px;
+  padding: 20px;
+  color: #e8f1ff;
+  display: grid;
+  gap: 14px;
+  text-align: center;
+}
+
+.gift-offer-body {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+}
+
+.gift-offer-media {
+  display: grid;
+  grid-template-columns: 38px 48px;
+  gap: 8px;
+  align-items: center;
+}
+
+.gift-offer-image {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  background: rgba(232, 241, 255, 0.08);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.gift-offer-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: rgba(232, 241, 255, 0.08);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.gift-offer-avatar img,
+.gift-offer-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.gift-offer-fallback {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: #6ee7ff;
+  font-weight: 700;
+}
+
+.gift-offer-text strong {
+  display: block;
+  font-size: 14px;
+}
+
+.gift-offer-text span {
+  display: block;
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 4px;
+}
+
+.gift-offer-progress {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(232, 241, 255, 0.1);
+  overflow: hidden;
+}
+
+.gift-offer-progress-bar {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, #6ee7ff, #3aa6ff);
+  transition: width 0.1s linear;
+}
+
+.gift-offer-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.gift-offer-actions button {
+  border: none;
+  border-radius: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.gift-offer-actions button[data-action="reject"] {
+  background: rgba(232, 241, 255, 0.1);
+  color: #e8f1ff;
+}
+
+.gift-offer-actions button[data-action="accept"] {
+  background: #6ee7ff;
+  color: #0b1220;
+}
