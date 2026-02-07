@@ -100,6 +100,32 @@ profileRouter.post("/images", async (req, res) => {
     res.status(400).send("Missing url");
     return;
   }
+  const existingPrimary = await prisma.userImage.findFirst({
+    where: { userId: user.id, isPrimary: true },
+    select: { id: true }
+  });
+  if (!existingPrimary) {
+    const [, image] = await prisma.$transaction([
+      prisma.userImage.updateMany({
+        where: { userId: user.id },
+        data: { isPrimary: false }
+      }),
+      prisma.userImage.create({
+        data: {
+          userId: user.id,
+          url,
+          isPrimary: true
+        }
+      }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: { avatarUrl: url }
+      })
+    ]);
+    notifyAvatarChange(user.id, url);
+    res.json(image);
+    return;
+  }
   const image = await prisma.userImage.create({
     data: {
       userId: user.id,

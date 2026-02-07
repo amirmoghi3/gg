@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../config";
 import { getAuthedUser } from "../services/userService";
-import { notifyToast, notifyGiftOffer } from "../ws";
+import { notifyToast, notifyGiftOffer, notifyGiftReturn, notifyFreezeNearby } from "../ws";
 import { checkCooldown } from "../services/cooldownService";
 import { ActionType } from "@prisma/client";
 
@@ -84,18 +84,6 @@ giftsRouter.post("/send", async (req, res) => {
       }
     });
 
-    await tx.actionLog.create({
-      data: {
-        userId: toUserId,
-        type: ActionType.GIFT_RECEIVE,
-        data: {
-          giftId: created.id,
-          fromUserId: user.id,
-          storeItemId: item.id
-        }
-      }
-    });
-
     return created;
   });
 
@@ -132,7 +120,11 @@ giftsRouter.post("/decide", async (req, res) => {
 
   const gift = await prisma.gift.findUnique({
     where: { id: giftId },
-    include: { storeItem: true }
+    include: {
+      storeItem: {
+        include: { effects: { include: { effect: true } } }
+      }
+    }
   });
   if (!gift || gift.toUserId !== user.id) {
     res.status(404).send("Gift not found");
@@ -175,6 +167,14 @@ giftsRouter.post("/decide", async (req, res) => {
         });
       }
     });
+    if (gift.fromUserId) {
+      notifyToast(gift.fromUserId, "Your gift expired");
+      notifyGiftReturn(gift.fromUserId, {
+        giftId: gift.id,
+        storeItemId: gift.storeItemId,
+        reason: "expired"
+      });
+    }
     res.json({ ok: true, status: "expired" });
     return;
   }
@@ -220,6 +220,11 @@ giftsRouter.post("/decide", async (req, res) => {
     });
     if (gift.fromUserId) {
       notifyToast(gift.fromUserId, `${user.nickname ?? "User"} rejected your gift`);
+      notifyGiftReturn(gift.fromUserId, {
+        giftId: gift.id,
+        storeItemId: gift.storeItemId,
+        reason: "rejected"
+      });
     }
     notifyToast(user.id, "Gift rejected");
     res.json({ ok: true, status: "rejected" });
@@ -263,6 +268,18 @@ giftsRouter.post("/decide", async (req, res) => {
       }
     });
 
+    await tx.actionLog.create({
+      data: {
+        userId: user.id,
+        type: ActionType.GIFT_RECEIVE,
+        data: {
+          giftId: gift.id,
+          fromUserId: gift.fromUserId,
+          storeItemId: gift.storeItemId
+        }
+      }
+    });
+
     await tx.socialEvent.create({
       data: {
         toUserId: user.id,
@@ -280,5 +297,19 @@ giftsRouter.post("/decide", async (req, res) => {
     );
   }
   notifyToast(user.id, `You received ${gift.storeItem.name}`);
+  for (const link of gift.storeItem.effects ?? []) {
+    const effect = link.effect;
+    if (effect.handlerKey === "freeze_nearby") {
+      const radius =
+        typeof (effect.config as any)?.radius === "number"
+          ? (effect.config as any).radius
+          : 120;
+      const durationMs =
+        typeof (effect.config as any)?.durationMs === "number"
+          ? (effect.config as any).durationMs
+          : (effect.durationSeconds ?? 3) * 1000;
+      notifyFreezeNearby(user.id, radius, durationMs);
+    }
+  }
   res.json({ ok: true, status: "accepted" });
 });

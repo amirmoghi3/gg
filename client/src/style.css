@@ -931,7 +931,7 @@ canvas {
 
 .gift-offer-media {
   display: grid;
-  grid-template-columns: 38px 48px;
+  grid-template-columns: 38px 64px;
   gap: 8px;
   align-items: center;
 }

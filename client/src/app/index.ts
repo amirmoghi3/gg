@@ -21,11 +21,22 @@ type StoreItem = {
   price: number;
   description?: string | null;
   imageUrl?: string | null;
+  isEquippable?: boolean;
+  effects?: Array<{
+    effect: {
+      slug: string;
+      handlerKey: string;
+      durationSeconds?: number | null;
+      config?: any;
+    };
+  }>;
 };
 
 type InventoryItem = {
   id: string;
   isEquipped: boolean;
+  expiresAt?: string | null;
+  isExpired?: boolean;
   storeItem: StoreItem;
   senders?: Array<{
     id: string | null;
@@ -50,6 +61,9 @@ const STORE_IMAGE_BASE =
   ((import.meta as any).env?.VITE_STORE_IMAGE_BASE as string | undefined) ?? "";
 let giftSendCooldownUntil = 0;
 let giftSendCooldownTimer: number | null = null;
+let giftReturnListenerAttached = false;
+let actionTabContext: { token: string; toUserId: string } | null = null;
+let inventoryExpireListenerAttached = false;
 
 function resolveStoreImageUrl(url?: string | null) {
   if (!url) return "";
@@ -59,7 +73,65 @@ function resolveStoreImageUrl(url?: string | null) {
   return base ? `${base}${path}` : url;
 }
 
+function showToast(text: string) {
+  let container = document.getElementById("toast-center");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toast-center";
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.textContent = text;
+  container.appendChild(toast);
+  window.setTimeout(() => {
+    toast.classList.add("hide");
+    window.setTimeout(() => toast.remove(), 300);
+  }, 2200);
+}
+
 export function mountApp(root: HTMLElement) {
+  if (!giftReturnListenerAttached) {
+    giftReturnListenerAttached = true;
+    window.addEventListener("gg:gift-returned", () => {
+      if (!actionTabContext) return;
+      const modal = document.getElementById("profile-modal");
+      const actionSection = modal?.querySelector(
+        ".profile-modal-section.action"
+      ) as HTMLElement | null;
+      if (!actionSection) return;
+      if (actionSection.style.display === "none") return;
+      void renderActionTab(
+        actionSection,
+        actionTabContext.token,
+        actionTabContext.toUserId
+      );
+    });
+  }
+  if (!inventoryExpireListenerAttached) {
+    inventoryExpireListenerAttached = true;
+    window.addEventListener("gg:inventory-expired", () => {
+      const menu = document.querySelector("[data-role='menu']") as HTMLElement | null;
+      if (!menu || menu.classList.contains("menu-hidden")) return;
+      const panel = menu.querySelector(".menu-panel") as HTMLElement | null;
+      if (!panel) return;
+      const inventoryTab = document.querySelector(
+        "button[data-tab='inventory']"
+      ) as HTMLButtonElement | null;
+      if (!inventoryTab || !inventoryTab.classList.contains("active")) return;
+      const token = localStorage.getItem(STORAGE_TOKEN) ?? "";
+      if (!token) return;
+      const user = parseUser(localStorage.getItem(STORAGE_USER));
+      if (!user) return;
+      void renderInventoryPanel(panel, {
+        token,
+        user,
+        inGame: false,
+        gameController: null,
+        menuVisible: true
+      });
+    });
+  }
   const state = {
     token: localStorage.getItem(STORAGE_TOKEN) ?? "",
     user: parseUser(localStorage.getItem(STORAGE_USER)),
@@ -92,6 +164,37 @@ export function mountApp(root: HTMLElement) {
   };
 
   void render();
+}
+
+async function applyEquippedEffects(token: string) {
+  const items = await fetchInventory(token);
+  if (!items) return;
+  for (const item of items) {
+    if (!item.isEquipped) continue;
+    const effects = item.storeItem.effects ?? [];
+    for (const link of effects) {
+      if (link.effect.handlerKey === "freeze_nearby") {
+        const radius =
+          typeof link.effect.config?.radius === "number" ? link.effect.config.radius : 120;
+        const durationMs =
+          typeof link.effect.config?.durationMs === "number"
+            ? link.effect.config.durationMs
+            : (link.effect.durationSeconds ?? 3) * 1000;
+        const includeSelf = !!link.effect.config?.includeSelf;
+        window.dispatchEvent(
+          new CustomEvent("gg:effect-equipped", {
+            detail: {
+              key: "freeze",
+              radius,
+              durationMs,
+              includeSelf,
+              expiresAt: item.expiresAt ?? null
+            }
+          })
+        );
+      }
+    }
+  }
 }
 
 function renderLogin(
@@ -191,7 +294,10 @@ function renderMenu(
     state.user.balances?.find((b) => b.currency === "GG")?.balance ?? 0;
   const displayName = state.user.nickname ?? state.user.phone ?? "Player";
   header.innerHTML = `
-    <div class="brand">GG Social</div>
+    <div class="brand">
+      GG Social
+      ${state.inGame ? `<button class="ghost" data-action="return">Return</button>` : ""}
+    </div>
     <div class="actions">
       <span class="menu-name">${displayName}</span>
       <span class="menu-balance">GG ${ggBalance}</span>
@@ -266,6 +372,18 @@ function renderMenu(
 
   header.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
+    if (target.matches("button[data-action='return']")) {
+      const menu = document.querySelector("[data-role='menu']") as HTMLElement | null;
+      if (menu) {
+        menu.classList.add("menu-hidden");
+      }
+      state.menuVisible = false;
+      const menuButton = document.getElementById("menu-toggle") as HTMLButtonElement | null;
+      if (menuButton) {
+        menuButton.style.display = "block";
+      }
+      return;
+    }
     if (!target.matches("button[data-action='logout']")) return;
     localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_USER);
@@ -353,11 +471,18 @@ function renderStartPanel(
     }
 
     const overlay = ensureGameOverlay();
-    const blockState = await fetchBlocks(state.token);
-    const muteState = await fetchMutes(state.token);
+    overlay.classList.add("game-active");
+    let blockState: Awaited<ReturnType<typeof fetchBlocks>> = null;
+    let muteState: Awaited<ReturnType<typeof fetchMutes>> = null;
+    try {
+      blockState = await fetchBlocks(state.token);
+      muteState = await fetchMutes(state.token);
+    } catch {
+      blockState = null;
+      muteState = null;
+    }
     const ggBalance =
       state.user?.balances?.find((b) => b.currency === "GG")?.balance ?? 0;
-    overlay.classList.add("game-active");
     state.gameController = startGame({
       parentId: "game-root",
       token: state.token,
@@ -380,6 +505,11 @@ function renderStartPanel(
       mutedIds: muteState?.mutedIds ?? [],
       ggBalance
     });
+    const onGameReady = () => {
+      window.removeEventListener("gg:game-ready", onGameReady);
+      void applyEquippedEffects(state.token);
+    };
+    window.addEventListener("gg:game-ready", onGameReady);
     state.inGame = true;
     state.menuVisible = false;
     const menuButton = document.getElementById("menu-toggle") as HTMLButtonElement | null;
@@ -399,6 +529,10 @@ function renderStartPanel(
       menu.classList.add("menu-hidden");
     }
     state.menuVisible = false;
+    const menuButton = document.getElementById("menu-toggle") as HTMLButtonElement | null;
+    if (menuButton) {
+      menuButton.style.display = "block";
+    }
   });
 
   card.appendChild(title);
@@ -581,17 +715,39 @@ function renderStorePanel(
   card.innerHTML = `<h2>Store</h2>`;
   panel.appendChild(card);
 
-  void (async () => {
-    const items = await fetchStoreItems();
-    if (!items || items.length === 0) {
+  const search = document.createElement("input");
+  search.type = "text";
+  search.placeholder = "Search store...";
+  card.appendChild(search);
+
+  const list = document.createElement("div");
+  list.className = "store-list";
+  card.appendChild(list);
+
+  const renderItems = (items: StoreItem[], query: string) => {
+    list.innerHTML = "";
+    const needle = query.trim().toLowerCase();
+    const filtered = needle
+      ? items.filter((item) => {
+          const name = item.name.toLowerCase();
+          const category = item.category.toLowerCase();
+          const desc = (item.description ?? "").toLowerCase();
+          return (
+            name.includes(needle) ||
+            category.includes(needle) ||
+            desc.includes(needle)
+          );
+        })
+      : items;
+
+    if (filtered.length === 0) {
       const empty = document.createElement("p");
-      empty.textContent = "No items available.";
-      card.appendChild(empty);
+      empty.textContent = "No items match your search.";
+      list.appendChild(empty);
       return;
     }
-    const list = document.createElement("div");
-    list.className = "store-list";
-    items.forEach((item) => {
+
+    filtered.forEach((item) => {
       const imageUrl = resolveStoreImageUrl(item.imageUrl);
       const row = document.createElement("div");
       row.className = "store-item";
@@ -614,11 +770,28 @@ function renderStorePanel(
         if (!success) return;
         await refreshUserState(state);
         updateMenuBalance();
+        const nav = document.querySelector(".menu-nav");
+        if (nav) {
+          nav.querySelectorAll("button").forEach((btn) => btn.classList.remove("active"));
+          nav.querySelector("button[data-tab='inventory']")?.classList.add("active");
+        }
         void renderInventoryPanel(panel, state);
       });
       list.appendChild(row);
     });
-    card.appendChild(list);
+  };
+
+  void (async () => {
+    const items = await fetchStoreItems();
+    if (!items || items.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No items available.";
+      card.appendChild(empty);
+      list.remove();
+      return;
+    }
+    renderItems(items, "");
+    search.addEventListener("input", () => renderItems(items, search.value));
   })();
 }
 
@@ -1055,6 +1228,14 @@ function renderImageGallery(
   onPrimary?: (url: string) => void
 ) {
   container.innerHTML = "";
+  const primaryUrl = images.find((img) => img.isPrimary)?.url;
+  if (primaryUrl && state.user.avatarUrl !== primaryUrl) {
+    state.user.avatarUrl = primaryUrl;
+    onPrimary?.(primaryUrl);
+    window.dispatchEvent(
+      new CustomEvent("gg:local-avatar-updated", { detail: { url: primaryUrl } })
+    );
+  }
   images.forEach((img) => {
     const item = document.createElement("div");
     item.className = "profile-image-item";
@@ -1222,6 +1403,7 @@ async function sendGift(
 }
 
 async function renderActionTab(container: HTMLElement, token: string, toUserId: string) {
+  actionTabContext = { token, toUserId };
   container.innerHTML = `
     <div class="action-header">
       <h4>Send Gift</h4>
@@ -1229,9 +1411,32 @@ async function renderActionTab(container: HTMLElement, token: string, toUserId: 
     </div>
     <div class="profile-modal-gifts">Loading...</div>
   `;
+  container.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target || target.tagName !== "BUTTON") return;
+    const button = target as HTMLButtonElement;
+    if (!button.disabled) return;
+    const remaining = Math.max(0, Math.ceil((giftSendCooldownUntil - Date.now()) / 1000));
+    if (remaining > 0) {
+      showToast(`Gift sending is on cooldown. Try again in ${remaining}s.`);
+    }
+  });
   container.querySelector(".action-store-btn")?.addEventListener("click", () => {
+    const menu = document.querySelector("[data-role='menu']") as HTMLElement | null;
+    if (menu) {
+      menu.classList.remove("menu-hidden");
+    }
+    const menuButton = document.getElementById("menu-toggle") as HTMLButtonElement | null;
+    if (menuButton) {
+      menuButton.style.display = "none";
+    }
     const storeTab = document.querySelector("button[data-tab='store']") as HTMLButtonElement | null;
     storeTab?.click();
+    const modal = document.getElementById("profile-modal");
+    if (modal) {
+      modal.classList.remove("open");
+      window.dispatchEvent(new Event("gg:profile-closed"));
+    }
   });
   const target = container.querySelector(".profile-modal-gifts") as HTMLElement | null;
   if (!target) return;
@@ -1266,6 +1471,7 @@ async function renderActionTab(container: HTMLElement, token: string, toUserId: 
         giftSendCooldownUntil = seconds > 0 ? Date.now() + seconds * 1000 : 0;
       } else if (typeof result.retryAfter === "number") {
         giftSendCooldownUntil = Date.now() + result.retryAfter * 1000;
+        showToast(`Gift sending is on cooldown. Try again in ${result.retryAfter}s.`);
       }
       updateGiftSendButtons(container);
       if (!result.ok) return;
@@ -1298,6 +1504,11 @@ async function renderInventoryPanel(
   card.innerHTML = `<h2>Inventory</h2>`;
   panel.appendChild(card);
 
+  const search = document.createElement("input");
+  search.type = "text";
+  search.placeholder = "Search inventory...";
+  card.appendChild(search);
+
   const items = await fetchInventory(state.token);
   if (!items || items.length === 0) {
     const empty = document.createElement("p");
@@ -1305,49 +1516,179 @@ async function renderInventoryPanel(
     card.appendChild(empty);
     return;
   }
+  const now = Date.now();
+  const activeLockUntil = items
+    .filter((item) => item.isEquipped && item.expiresAt)
+    .map((item) => Date.parse(item.expiresAt as string))
+    .filter((ts) => Number.isFinite(ts) && ts > now)
+    .sort((a, b) => b - a)[0];
+
+  const equippedFreeze = items.find(
+    (item) =>
+      item.isEquipped &&
+      item.storeItem.effects?.some((e) => e.effect.handlerKey === "freeze_nearby")
+  );
+  if (equippedFreeze) {
+    const freezeEffect = equippedFreeze.storeItem.effects?.find(
+      (e) => e.effect.handlerKey === "freeze_nearby"
+    );
+    if (freezeEffect) {
+      const radius =
+        typeof freezeEffect.effect.config?.radius === "number"
+          ? freezeEffect.effect.config.radius
+          : 120;
+      const durationMs =
+        typeof freezeEffect.effect.config?.durationMs === "number"
+          ? freezeEffect.effect.config.durationMs
+          : (freezeEffect.effect.durationSeconds ?? 3) * 1000;
+      window.dispatchEvent(
+        new CustomEvent("gg:effect-equipped", {
+          detail: {
+            key: "freeze",
+            radius,
+            durationMs,
+            includeSelf: !!freezeEffect.effect.config?.includeSelf,
+            expiresAt: equippedFreeze.expiresAt ?? null
+          }
+        })
+      );
+    }
+  }
   const list = document.createElement("div");
   list.className = "inventory-list";
-  items.forEach((item) => {
-    const imageUrl = resolveStoreImageUrl(item.storeItem.imageUrl);
-    const row = document.createElement("div");
-    row.className = "inventory-item";
-    row.innerHTML = `
+  const renderItems = (allItems: InventoryItem[], query: string) => {
+    list.innerHTML = "";
+    const needle = query.trim().toLowerCase();
+    const filtered = (needle
+      ? allItems.filter((item) => {
+          const name = item.storeItem.name.toLowerCase();
+          const category = item.storeItem.category.toLowerCase();
+          return name.includes(needle) || category.includes(needle);
+        })
+      : allItems
+    ).filter((item) => {
+      const expiresAt = item.expiresAt ? Date.parse(item.expiresAt) : null;
+      const isExpired = !!item.isExpired || (expiresAt !== null && expiresAt <= Date.now());
+      return !isExpired;
+    });
+
+    if (filtered.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No items match your search.";
+      list.appendChild(empty);
+      return;
+    }
+
+    filtered.forEach((item) => {
+      const imageUrl = resolveStoreImageUrl(item.storeItem.imageUrl);
+      const isEquippable = item.storeItem.isEquippable !== false;
+      const expiresAt = item.expiresAt ? Date.parse(item.expiresAt) : null;
+      const isExpired = !!item.isExpired || (expiresAt !== null && expiresAt <= Date.now());
+      const row = document.createElement("div");
+      row.className = "inventory-item";
+      row.innerHTML = `
       <div>
         ${imageUrl ? `<img src="${imageUrl}" alt="${item.storeItem.name}" />` : ""}
         <strong>${item.storeItem.name}</strong>
         <span>${item.storeItem.category}</span>
         <div class="inventory-senders"></div>
       </div>
+      <button class="inventory-equip">
+        ${item.isEquipped ? "Equipped" : isExpired ? "Expired" : isEquippable ? "Equip" : "Not Equippable"}
+      </button>
     `;
-    const sendersHost = row.querySelector(".inventory-senders") as HTMLElement | null;
-    if (sendersHost && item.senders && item.senders.length > 0) {
-      const visible = item.senders.slice(0, 2);
-      visible.forEach((sender) => {
-        const badge = document.createElement("div");
-        badge.className = "sender-badge";
-        badge.innerHTML = `
+      const equipButton = row.querySelector(".inventory-equip") as HTMLButtonElement | null;
+      if (equipButton) {
+        const locked =
+          typeof activeLockUntil === "number" &&
+          Number.isFinite(activeLockUntil) &&
+          activeLockUntil > Date.now() &&
+          !item.isEquipped;
+        equipButton.disabled = !isEquippable || item.isEquipped || isExpired || locked;
+        if (item.isEquipped && expiresAt && expiresAt > Date.now()) {
+          const remaining = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1000));
+          equipButton.textContent = `Equipped (${remaining}s)`;
+        } else if (locked && typeof activeLockUntil === "number") {
+          const remaining = Math.max(1, Math.ceil((activeLockUntil - Date.now()) / 1000));
+          equipButton.textContent = `Locked (${remaining}s)`;
+        }
+        equipButton.addEventListener("click", async () => {
+          if (!equipButton || equipButton.disabled) return;
+          const result = await equipInventory(state.token, item.id, true);
+          if (!result.ok) {
+            if (typeof result.retryAfter === "number") {
+              showToast(`Cooldown active. Try again in ${result.retryAfter}s.`);
+            } else {
+              showToast("Equip failed.");
+            }
+            return;
+          }
+          const equippedItem = result.item ?? item;
+          const effects = equippedItem.storeItem.effects ?? [];
+          const freeze = effects.find((e) => e.effect.handlerKey === "freeze_nearby");
+          if (freeze) {
+            const radius =
+              typeof freeze.effect.config?.radius === "number"
+                ? freeze.effect.config.radius
+                : 120;
+            const durationMs =
+              typeof freeze.effect.config?.durationMs === "number"
+                ? freeze.effect.config.durationMs
+                : (freeze.effect.durationSeconds ?? 3) * 1000;
+            const includeSelf = !!freeze.effect.config?.includeSelf;
+            window.dispatchEvent(
+              new CustomEvent("gg:effect-equipped", {
+                detail: {
+                  key: "freeze",
+                  radius,
+                  durationMs,
+                  includeSelf,
+                  expiresAt: equippedItem.expiresAt ?? null
+                }
+              })
+            );
+          }
+          void renderInventoryPanel(panel, state);
+        });
+      }
+      const sendersHost = row.querySelector(".inventory-senders") as HTMLElement | null;
+      if (sendersHost && item.senders && item.senders.length > 0) {
+        const visible = item.senders.slice(0, 2);
+        visible.forEach((sender) => {
+          const badge = document.createElement("div");
+          badge.className = "sender-badge";
+          badge.innerHTML = `
           <span class="sender-dot ${sender.isOnline ? "online" : "offline"}"></span>
           <span>${sender.name}</span>
         `;
-        badge.addEventListener("click", () => {
-          if (sender.id) {
-            void openPublicProfile(state.token, sender.id, state.user!.id);
-          }
+          badge.addEventListener("click", () => {
+            if (sender.id) {
+              void openPublicProfile(state.token, sender.id, state.user!.id);
+            }
+          });
+          sendersHost.appendChild(badge);
         });
-        sendersHost.appendChild(badge);
-      });
-      if (item.senders.length > 2) {
-        const more = document.createElement("button");
-        more.className = "sender-more";
-        more.textContent = `Show more (${item.senders.length - 2})`;
-        more.addEventListener("click", () => {
-          showSendersModal(item.senders ?? [], state.token, state.user!.id);
-        });
-        sendersHost.appendChild(more);
+        if (item.senders.length > 2) {
+          const more = document.createElement("button");
+          more.className = "sender-more";
+          more.textContent = `Show more (${item.senders.length - 2})`;
+          more.addEventListener("click", () => {
+            showSendersModal(item.senders ?? [], state.token, state.user!.id);
+          });
+          sendersHost.appendChild(more);
+        }
       }
-    }
-    list.appendChild(row);
-  });
+      list.appendChild(row);
+    });
+  };
+  renderItems(items, "");
+  search.addEventListener("input", () => renderItems(items, search.value));
+  if ((renderInventoryPanel as any)._timer) {
+    window.clearInterval((renderInventoryPanel as any)._timer as number);
+  }
+  (renderInventoryPanel as any)._timer = window.setInterval(() => {
+    renderItems(items, search.value);
+  }, 1000);
   card.appendChild(list);
 }
 
@@ -1357,6 +1698,26 @@ async function fetchInventory(token: string): Promise<InventoryItem[] | null> {
   });
   if (!res.ok) return null;
   return (await res.json()) as InventoryItem[];
+}
+
+async function equipInventory(token: string, inventoryItemId: string, equipped: boolean) {
+  const res = await fetch(`${API_BASE}/inventory/equip`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({ inventoryItemId, equipped })
+  });
+  if (res.ok) {
+    const data = (await res.json().catch(() => null)) as InventoryItem | null;
+    return { ok: true, item: data ?? undefined };
+  }
+  if (res.status === 429 || res.status === 409) {
+    const data = (await res.json().catch(() => null)) as { retryAfter?: number } | null;
+    return { ok: false, retryAfter: data?.retryAfter };
+  }
+  return { ok: false };
 }
 
 async function refreshUserState(state: {

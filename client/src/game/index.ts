@@ -31,11 +31,44 @@ type PlayerState = {
 };
 
 type ServerMessage =
-  | { type: "welcome"; id: string; players: PlayerState[] }
+  | { type: "welcome"; id: string; players: PlayerState[]; serverTime: string }
   | { type: "playerUpdate"; player: PlayerState }
   | { type: "playerLeft"; id: string }
   | { type: "speaking"; id: string; speaking: boolean }
   | { type: "toast"; text: string }
+  | { type: "inventoryExpired"; itemId: string }
+  | {
+      type: "effectState";
+      effect: { key: "freeze"; active: boolean; expiresAt?: string };
+    }
+  | {
+      type: "effectCast";
+      effect: {
+        key: "freeze";
+        casterId: string;
+        casterName: string;
+        casterAvatarUrl: string | null;
+        radius: number;
+        includeSelf: boolean;
+        expiresAt: string;
+      };
+    }
+  | { type: "effectExpired"; key: "freeze" }
+  | {
+      type: "effect";
+      effect: {
+        key: "freeze";
+        expiresAt: string;
+      };
+    }
+  | {
+      type: "giftReturn";
+      gift: {
+        giftId: string;
+        storeItemId: string;
+        reason: "rejected" | "expired";
+      };
+    }
   | {
       type: "giftOffer";
       gift: {
@@ -137,6 +170,7 @@ class BootScene extends Phaser.Scene {
     s: Phaser.Input.Keyboard.Key;
     d: Phaser.Input.Keyboard.Key;
     talk: Phaser.Input.Keyboard.Key;
+    effect: Phaser.Input.Keyboard.Key;
   };
 
   private mapWidth = 0;
@@ -146,6 +180,23 @@ class BootScene extends Phaser.Scene {
   private speed = 240;
   private turnSmoothing = 0.35;
   private swipeInput!: SwipeDirectionInput;
+  private frozenUntil = 0;
+  private freezeEffect:
+    | { radius: number; durationMs: number; includeSelf: boolean }
+    | null = null;
+  private freezeRing: Phaser.GameObjects.Graphics | null = null;
+  private activeEffectUntil = 0;
+  private freezeFields = new Map<
+    string,
+    {
+      radius: number;
+      expiresAt: number;
+      ring: Phaser.GameObjects.Graphics;
+      name: string;
+      avatarUrl: string | null;
+      includeSelf: boolean;
+    }
+  >();
 
   private room: Room | null = null;
   private remoteAudio = new Map<string, { track: RemoteAudioTrack; lastVolume: number }>();
@@ -162,6 +213,9 @@ class BootScene extends Phaser.Scene {
   private hud: {
     root: HTMLDivElement;
     count: HTMLDivElement;
+    freeze: HTMLDivElement;
+    effect: HTMLDivElement;
+    effectCast: HTMLDivElement;
   } | null = null;
   private minimapCanvas: HTMLCanvasElement | null = null;
   private minimapCtx: CanvasRenderingContext2D | null = null;
@@ -173,6 +227,7 @@ class BootScene extends Phaser.Scene {
   private avatarLoadMargin = 120;
   private spawnZone = { x: 32, y: 32, width: 220, height: 220 };
   private balanceHud: HTMLDivElement | null = null;
+  private serverTimeOffsetMs = 0;
 
   private proximityRange = 240;
   private maxSpeakers = 8;
@@ -276,11 +331,13 @@ class BootScene extends Phaser.Scene {
       a: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
       s: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       d: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
-      talk: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.V)
+      talk: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.V),
+      effect: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F)
     };
 
     this.keys.talk.on("down", () => this.setTalking(true));
     this.keys.talk.on("up", () => this.setTalking(false));
+    this.keys.effect.on("down", () => this.triggerFreezeEffect());
 
     this.swipeInput = new SwipeDirectionInput(this, {
       deadZone: 3,
@@ -290,14 +347,30 @@ class BootScene extends Phaser.Scene {
     const handler = this.handleProfileClosed;
     const openHandler = this.handleProfileOpened;
     const avatarHandler = this.handleLocalAvatarUpdated;
+    const effectHandler = this.handleEffectEquipped;
     window.addEventListener("gg:profile-closed", handler);
     window.addEventListener("gg:profile-opened", openHandler);
     window.addEventListener("gg:local-avatar-updated", avatarHandler as EventListener);
+    window.addEventListener("gg:effect-equipped", effectHandler as EventListener);
+    window.dispatchEvent(new Event("gg:game-ready"));
     if ((this.game as any).events) {
       (this.game as any).events.once("destroy", () => {
+        if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+          this.socket.close();
+        }
+        this.socket = null;
+        if (this.room) {
+          try {
+            this.room.disconnect();
+          } catch {
+            // ignore disconnect errors
+          }
+        }
+        this.room = null;
         window.removeEventListener("gg:profile-closed", handler);
         window.removeEventListener("gg:profile-opened", openHandler);
         window.removeEventListener("gg:local-avatar-updated", avatarHandler as EventListener);
+        window.removeEventListener("gg:effect-equipped", effectHandler as EventListener);
       });
     }
 
@@ -340,14 +413,138 @@ class BootScene extends Phaser.Scene {
     this.load.start();
   };
 
+  private handleEffectEquipped = (event: Event) => {
+    const detail = (event as CustomEvent<{
+      key: string;
+      radius: number;
+      durationMs: number;
+      includeSelf?: boolean;
+      expiresAt?: string | null;
+    }>).detail;
+    if (!detail || detail.key !== "freeze") return;
+    this.freezeEffect = {
+      radius: Math.max(40, Math.min(400, detail.radius)),
+      durationMs: Math.max(500, Math.min(10000, detail.durationMs)),
+      includeSelf: !!detail.includeSelf
+    };
+    const expiresAt = detail.expiresAt ? Date.parse(detail.expiresAt) : NaN;
+    this.activeEffectUntil = Number.isFinite(expiresAt)
+      ? expiresAt
+      : Date.now() + this.freezeEffect.durationMs;
+    this.ensureFreezeRing();
+    if (this.hud) {
+      const remaining = Math.max(
+        0,
+        Math.ceil((this.activeEffectUntil - Date.now()) / 1000)
+      );
+      this.hud.effect.textContent =
+        remaining > 0 ? `Active Effect: Freeze (${remaining}s)` : "Active Effect: Freeze";
+    }
+    this.triggerFreezeEffect();
+  };
+
+  private ensureFreezeRing() {
+    if (!this.player) return;
+    if (!this.freezeRing) {
+      this.freezeRing = this.add.graphics();
+      this.freezeRing.setDepth(2);
+    }
+    if (!this.freezeEffect) return;
+    this.freezeRing.clear();
+    this.freezeRing.lineStyle(2, 0x5dd6ff, 0.7);
+    this.freezeRing.fillStyle(0x6ee7ff, 0.08);
+    this.freezeRing.fillCircle(0, 0, this.freezeEffect.radius);
+    this.freezeRing.strokeCircle(0, 0, this.freezeEffect.radius);
+    this.freezeRing.setPosition(this.player.x, this.player.y);
+  }
+
+  private upsertFreezeField(
+    casterId: string,
+    radius: number,
+    expiresAt: number,
+    name: string,
+    avatarUrl: string | null,
+    includeSelf: boolean
+  ) {
+    let field = this.freezeFields.get(casterId);
+    if (!field) {
+      const ring = this.add.graphics();
+      ring.setDepth(2);
+      field = { radius, expiresAt, ring, name, avatarUrl, includeSelf };
+      this.freezeFields.set(casterId, field);
+    }
+    field.radius = Math.max(40, Math.min(400, radius));
+    field.expiresAt = Math.max(field.expiresAt, expiresAt);
+    field.name = name;
+    field.avatarUrl = avatarUrl;
+    field.includeSelf = includeSelf;
+    field.ring.clear();
+    field.ring.lineStyle(2, 0x5dd6ff, 0.7);
+    field.ring.fillStyle(0x6ee7ff, 0.08);
+    field.ring.fillCircle(0, 0, field.radius);
+    field.ring.strokeCircle(0, 0, field.radius);
+  }
+
+  private triggerFreezeEffect() {
+    if (!this.freezeEffect) return;
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    this.socket.send(
+      JSON.stringify({
+        type: "effect",
+        effect: {
+          key: "freeze",
+          radius: this.freezeEffect.radius,
+          durationMs: this.freezeEffect.durationMs,
+          includeSelf: this.freezeEffect.includeSelf
+        }
+      })
+    );
+  }
+
   update(_: number, delta: number) {
     if (!this.player) return;
+    const now = Date.now() + this.serverTimeOffsetMs;
+    for (const [casterId, field] of this.freezeFields.entries()) {
+      if (field.expiresAt <= now) {
+        field.ring.destroy();
+        this.freezeFields.delete(casterId);
+        continue;
+      }
+      const caster =
+        casterId === this.myId
+          ? this.player
+          : this.otherPlayers.get(casterId)?.obj ?? null;
+      if (caster) {
+        field.ring.setPosition(caster.x, caster.y);
+      }
+    }
+    const isFrozen = this.frozenUntil > now;
+    if (this.hud) {
+      const remaining = Math.max(0, Math.ceil((this.frozenUntil - now) / 1000));
+      this.hud.freeze.textContent = remaining > 0 ? `Frozen: ${remaining}s` : "";
+      const effectRemaining = Math.max(0, Math.ceil((this.activeEffectUntil - now) / 1000));
+      this.hud.effect.textContent =
+        effectRemaining > 0 ? `Active Effect: Freeze (${effectRemaining}s)` : "";
+      if (this.freezeFields.size > 0) {
+        const latest = Array.from(this.freezeFields.values()).sort(
+          (a, b) => b.expiresAt - a.expiresAt
+        )[0];
+        const remainingCast = Math.max(0, Math.ceil((latest.expiresAt - now) / 1000));
+        const avatar = latest.avatarUrl ?? "assets/avatar.png";
+        this.hud.effectCast.innerHTML = `
+          <img src="${avatar}" alt="Avatar" style="width:18px;height:18px;border-radius:50%;object-fit:cover;" />
+          <span>${latest.name} used Freeze (${remainingCast}s)</span>
+        `;
+      } else {
+        this.hud.effectCast.innerHTML = "";
+      }
+    }
 
     this.inputVector.set(0, 0);
-    const left = this.keys.left.isDown || this.keys.a.isDown;
-    const right = this.keys.right.isDown || this.keys.d.isDown;
-    const up = this.keys.up.isDown || this.keys.w.isDown;
-    const down = this.keys.down.isDown || this.keys.s.isDown;
+    const left = !isFrozen && (this.keys.left.isDown || this.keys.a.isDown);
+    const right = !isFrozen && (this.keys.right.isDown || this.keys.d.isDown);
+    const up = !isFrozen && (this.keys.up.isDown || this.keys.w.isDown);
+    const down = !isFrozen && (this.keys.down.isDown || this.keys.s.isDown);
 
     if (left) this.inputVector.x -= 1;
     if (right) this.inputVector.x += 1;
@@ -356,7 +553,7 @@ class BootScene extends Phaser.Scene {
 
     if (this.inputVector.lengthSq() > 0) {
       this.inputVector.normalize();
-    } else {
+    } else if (!isFrozen) {
       this.inputVector.copy(this.swipeInput.getDirection());
     }
 
@@ -369,6 +566,9 @@ class BootScene extends Phaser.Scene {
     const nextX = Phaser.Math.Clamp(this.player.x + moveX, 0, this.mapWidth);
     const nextY = Phaser.Math.Clamp(this.player.y + moveY, 0, this.mapHeight);
     this.player.setPosition(nextX, nextY);
+    if (this.freezeRing) {
+      this.freezeRing.setPosition(this.player.x, this.player.y);
+    }
     this.resolveCollisions();
     this.updateAvatarMask(this.player);
 
@@ -439,20 +639,8 @@ class BootScene extends Phaser.Scene {
 
   private connectSocket() {
     const host = window.location.hostname || "localhost";
-    this.socket = new WebSocket(`ws://${host}:8080`);
-
-    this.socket.onopen = () => {
-      this.socket?.send(
-        JSON.stringify({
-          type: "join",
-          token: this.options.token,
-          x: this.player.x,
-          y: this.player.y
-        })
-      );
-    };
-
-    this.socket.onmessage = (event) => {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const handleMessage = (event: MessageEvent) => {
       let message: ServerMessage | null = null;
       try {
         message = JSON.parse(event.data);
@@ -462,6 +650,10 @@ class BootScene extends Phaser.Scene {
 
       if (message.type === "welcome") {
         this.myId = message.id;
+        const serverTs = Date.parse(message.serverTime);
+        if (Number.isFinite(serverTs)) {
+          this.serverTimeOffsetMs = serverTs - Date.now();
+        }
         for (const p of message.players) {
           if (p.id === this.myId) continue;
           if (this.shouldHide(p.id)) continue;
@@ -501,11 +693,101 @@ class BootScene extends Phaser.Scene {
         return;
       }
 
+      if (message.type === "inventoryExpired") {
+        window.dispatchEvent(
+          new CustomEvent("gg:inventory-expired", { detail: { id: message.itemId } })
+        );
+        return;
+      }
+
+      if (message.type === "effectState") {
+        if (message.effect.key === "freeze") {
+          if (message.effect.active && message.effect.expiresAt) {
+            const expiresAt = Date.parse(message.effect.expiresAt);
+            this.frozenUntil = Number.isFinite(expiresAt) ? expiresAt : 0;
+          } else {
+            this.frozenUntil = 0;
+          }
+        }
+        return;
+      }
+
+      if (message.type === "effectCast") {
+        if (message.effect.key === "freeze") {
+          const expiresAt = Date.parse(message.effect.expiresAt);
+          this.upsertFreezeField(
+            message.effect.casterId,
+            message.effect.radius,
+            Number.isFinite(expiresAt) ? expiresAt : Date.now(),
+            message.effect.casterName,
+            message.effect.casterAvatarUrl,
+            message.effect.includeSelf
+          );
+        }
+        return;
+      }
+
+      if (message.type === "effectExpired") {
+        if (message.key === "freeze") {
+          this.freezeEffect = null;
+          this.activeEffectUntil = 0;
+          if (this.freezeRing) {
+            this.freezeRing.clear();
+          }
+          if (this.hud) {
+            this.hud.effect.textContent = "";
+          }
+        }
+        return;
+      }
+
+      if (message.type === "effect") {
+        if (message.effect.key === "freeze") {
+          const expiresAt = Date.parse(message.effect.expiresAt);
+          const until = Number.isFinite(expiresAt) ? expiresAt : Date.now();
+          this.frozenUntil = Math.max(this.frozenUntil, until);
+          this.showToast("You are frozen!");
+        }
+        return;
+      }
+
+      if (message.type === "giftReturn") {
+        window.dispatchEvent(new CustomEvent("gg:gift-returned", { detail: message.gift }));
+        return;
+      }
+
       if (message.type === "giftOffer") {
         this.showGiftOfferModal(message.gift);
         return;
       }
     };
+    const connect = (targetHost: string, allowFallback: boolean) => {
+      this.socket = new WebSocket(`${protocol}://${targetHost}:8080`);
+      let opened = false;
+      this.socket.onopen = () => {
+        opened = true;
+        this.socket?.send(
+          JSON.stringify({
+            type: "join",
+            token: this.options.token,
+            x: this.player.x,
+            y: this.player.y
+          })
+        );
+      };
+      this.socket.onmessage = handleMessage;
+      this.socket.onerror = () => {
+        if (allowFallback && targetHost === "localhost") {
+          connect("127.0.0.1", false);
+        }
+      };
+      this.socket.onclose = () => {
+        if (!opened && allowFallback && targetHost === "localhost") {
+          connect("127.0.0.1", false);
+        }
+      };
+    };
+    connect(host, true);
   }
 
   private upsertRemote(player: PlayerState) {
@@ -845,10 +1127,30 @@ class BootScene extends Phaser.Scene {
     count.id = "online-count";
     count.textContent = "Online: 1";
 
+    const freeze = document.createElement("div");
+    freeze.id = "freeze-status";
+    freeze.textContent = "";
+
+    const effect = document.createElement("div");
+    effect.id = "effect-status";
+    effect.textContent = "";
+
+    const effectCast = document.createElement("div");
+    effectCast.id = "effect-cast";
+    effectCast.style.display = "flex";
+    effectCast.style.alignItems = "center";
+    effectCast.style.gap = "6px";
+    effectCast.style.marginTop = "4px";
+    effectCast.style.fontSize = "12px";
+    effectCast.innerHTML = "";
+
     root.appendChild(count);
+    root.appendChild(freeze);
+    root.appendChild(effect);
+    root.appendChild(effectCast);
     document.body.appendChild(root);
 
-    this.hud = { root, count };
+    this.hud = { root, count, freeze, effect, effectCast };
   }
 
   private showToast(text: string) {

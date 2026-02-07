@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider     = "cockroachdb"
+  provider     = "postgresql"
   url          = env("DATABASE_URL")
   relationMode = "prisma"
 }
@@ -130,12 +130,14 @@ model StoreItem {
   description String?
   imageUrl    String?
   data        Json?
+  isEquippable Boolean @default(true)
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   inventoryItems InventoryItem[]
   gifts          Gift[]
+  effects        StoreItemEffect[]
 }
 
 model InventoryItem {
@@ -145,6 +147,7 @@ model InventoryItem {
   isEquipped Boolean  @default(false)
   rootInventoryId String?
   sourceGiftId String?
+  expiresAt DateTime?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -170,6 +173,32 @@ model Gift {
   storeItem StoreItem @relation(fields: [storeItemId], references: [id])
 
   @@index([toUserId])
+}
+
+model Effect {
+  id              String   @id @default(cuid())
+  slug            String   @unique
+  name            String
+  description     String?
+  durationSeconds Int?
+  handlerKey      String
+  config          Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  storeItems StoreItemEffect[]
+}
+
+model StoreItemEffect {
+  storeItemId String
+  effectId    String
+  createdAt   DateTime @default(now())
+
+  storeItem StoreItem @relation(fields: [storeItemId], references: [id])
+  effect    Effect    @relation(fields: [effectId], references: [id])
+
+  @@id([storeItemId, effectId])
+  @@index([effectId])
 }
 
 model ActionLog {
